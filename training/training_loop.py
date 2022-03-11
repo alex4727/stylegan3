@@ -7,7 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Main training loop."""
-
+import random 
 import os
 import time
 import copy
@@ -124,13 +124,19 @@ def training_loop(
     # Initialize.
     start_time = time.time()
     device = torch.device('cuda', rank)
-    np.random.seed(random_seed * num_gpus + rank)
-    torch.manual_seed(random_seed * num_gpus + rank)
-    torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
+
     torch.backends.cuda.matmul.allow_tf32 = False       # Improves numerical accuracy.
     torch.backends.cudnn.allow_tf32 = False             # Improves numerical accuracy.
     conv2d_gradfix.enabled = True                       # Improves training speed.
     grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    torch.cuda.manual_seed_all(0) # if use multi-GPU
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    np.random.seed(0)
+    random.seed(0)
+
 
     # Load training set.
     if rank == 0:
@@ -153,20 +159,16 @@ def training_loop(
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
 
-    # Resume from existing pickle.
-    if (resume_pkl is not None) and (rank == 0):
-        print(f'Resuming from "{resume_pkl}"')
-        with dnnlib.util.open_url(resume_pkl) as f:
-            resume_data = legacy.load_network_pkl(f)
-        for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
-            misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+    # torch.save({
+    #     'G': G.state_dict(),
+    #     'D': D.state_dict(),
+    #     'G_ema': G_ema.state_dict()
+    # }, '/root/code/statedict.pth')
 
-    # Print network summary tables.
-    if rank == 0:
-        z = torch.empty([batch_gpu, G.z_dim], device=device)
-        c = torch.empty([batch_gpu, G.c_dim], device=device)
-        img = misc.print_module_summary(G, [z, c])
-        misc.print_module_summary(D, [img, c])
+    tmp = torch.load('/root/code/statedict.pth')
+    G.load_state_dict(tmp['G'])
+    D.load_state_dict(tmp['D'])
+    G_ema.load_state_dict(tmp['G_ema'])
 
     # Setup augmentation.
     if rank == 0:
@@ -178,14 +180,6 @@ def training_loop(
         augment_pipe.p.copy_(torch.as_tensor(augment_p))
         if ada_target is not None:
             ada_stats = training_stats.Collector(regex='Loss/signs/real')
-
-    # Distribute across GPUs.
-    if rank == 0:
-        print(f'Distributing across {num_gpus} GPUs...')
-    for module in [G, D, G_ema, augment_pipe]:
-        if module is not None and num_gpus > 1:
-            for param in misc.params_and_buffers(module):
-                torch.distributed.broadcast(param, src=0)
 
     # Setup training phases.
     if rank == 0:
@@ -210,19 +204,6 @@ def training_loop(
         if rank == 0:
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
-
-    # Export sample images.
-    grid_size = None
-    grid_z = None
-    grid_c = None
-    if rank == 0:
-        print('Exporting sample images...')
-        grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
-        grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
     if rank == 0:
@@ -275,6 +256,10 @@ def training_loop(
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
             for real_img, real_c, gen_z, gen_c in zip(phase_real_img, phase_real_c, phase_gen_z, phase_gen_c):
+                real_img = torch.ones_like(real_img).to('cuda')
+                real_c = torch.zeros_like(real_c).to('cuda')
+                gen_z = torch.ones_like(gen_z).to('cuda')
+                gen_c = torch.zeros_like(gen_c).to('cuda')
                 loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg)
             phase.module.requires_grad_(False)
 
@@ -316,6 +301,7 @@ def training_loop(
             ada_stats.update()
             adjust = np.sign(ada_stats['Loss/signs/real'] - ada_target) * (batch_size * ada_interval) / (ada_kimg * 1000)
             augment_pipe.p.copy_((augment_pipe.p + adjust).max(misc.constant(0, device=device)))
+            print("ada",augment_pipe.p.item())
 
         # Perform maintenance tasks once per tick.
         done = (cur_nimg >= total_kimg * 1000)
@@ -338,8 +324,8 @@ def training_loop(
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
-        if rank == 0:
-            print(' '.join(fields))
+        # if rank == 0:
+        #     print(' '.join(fields))
 
         # Check for abort.
         if (not done) and (abort_fn is not None) and abort_fn():
@@ -348,41 +334,41 @@ def training_loop(
                 print()
                 print('Aborting...')
 
-        # Save image snapshot.
-        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+        # # Save image snapshot.
+        # if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
+        #     images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            # save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
-        # Save network snapshot.
-        snapshot_pkl = None
-        snapshot_data = None
-        if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
-            snapshot_data = dict(G=G, D=D, G_ema=G_ema, augment_pipe=augment_pipe, training_set_kwargs=dict(training_set_kwargs))
-            for key, value in snapshot_data.items():
-                if isinstance(value, torch.nn.Module):
-                    value = copy.deepcopy(value).eval().requires_grad_(False)
-                    if num_gpus > 1:
-                        misc.check_ddp_consistency(value, ignore_regex=r'.*\.[^.]+_(avg|ema)')
-                        for param in misc.params_and_buffers(value):
-                            torch.distributed.broadcast(param, src=0)
-                    snapshot_data[key] = value.cpu()
-                del value # conserve memory
-            snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pkl')
-            if rank == 0:
-                with open(snapshot_pkl, 'wb') as f:
-                    pickle.dump(snapshot_data, f)
+        # # Save network snapshot.
+        # snapshot_pkl = None
+        # snapshot_data = None
+        # if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
+        #     snapshot_data = dict(G=G, D=D, G_ema=G_ema, augment_pipe=augment_pipe, training_set_kwargs=dict(training_set_kwargs))
+        #     for key, value in snapshot_data.items():
+        #         if isinstance(value, torch.nn.Module):
+        #             value = copy.deepcopy(value).eval().requires_grad_(False)
+        #             if num_gpus > 1:
+        #                 misc.check_ddp_consistency(value, ignore_regex=r'.*\.[^.]+_(avg|ema)')
+        #                 for param in misc.params_and_buffers(value):
+        #                     torch.distributed.broadcast(param, src=0)
+        #             snapshot_data[key] = value.cpu()
+        #         del value # conserve memory
+        #     snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pkl')
+        #     if rank == 0:
+        #         with open(snapshot_pkl, 'wb') as f:
+        #             pickle.dump(snapshot_data, f)
 
         # Evaluate metrics.
-        if (snapshot_data is not None) and (len(metrics) > 0):
-            if rank == 0:
-                print('Evaluating metrics...')
-            for metric in metrics:
-                result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
-                    dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
-                if rank == 0:
-                    metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
-                stats_metrics.update(result_dict.results)
-        del snapshot_data # conserve memory
+        # if (snapshot_data is not None) and (len(metrics) > 0):
+        #     if rank == 0:
+        #         print('Evaluating metrics...')
+        #     for metric in metrics:
+        #         result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
+        #             dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
+        #         if rank == 0:
+        #             metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
+        #         stats_metrics.update(result_dict.results)
+        # del snapshot_data # conserve memory
 
         # Collect statistics.
         for phase in phases:

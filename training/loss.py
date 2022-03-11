@@ -45,7 +45,7 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('style_mixing'):
                 cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                 cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
-                ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
+                ws[:, cutoff:] = self.G.mapping(torch.ones_like(z), c, update_emas=False)[:, cutoff:]
         img = self.G.synthesis(ws, update_emas=update_emas)
         return img, ws
 
@@ -78,6 +78,7 @@ class StyleGAN2Loss(Loss):
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
                 training_stats.report('Loss/G/loss', loss_Gmain)
             with torch.autograd.profiler.record_function('Gmain_backward'):
+                print("G_adv", loss_Gmain.mean().item())
                 loss_Gmain.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
@@ -96,6 +97,7 @@ class StyleGAN2Loss(Loss):
                 loss_Gpl = pl_penalty * self.pl_weight
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
+                print("G_pl", loss_Gpl.mean().item()*gain)
                 loss_Gpl.mean().mul(gain).backward()
 
         # Dmain: Minimize logits for generated images.
@@ -124,7 +126,7 @@ class StyleGAN2Loss(Loss):
                 if phase in ['Dmain', 'Dboth']:
                     loss_Dreal = torch.nn.functional.softplus(-real_logits) # -log(sigmoid(real_logits))
                     training_stats.report('Loss/D/loss', loss_Dgen + loss_Dreal)
-
+                    print("Dis_adv", (loss_Dreal + loss_Dgen).mean().item())
                 loss_Dr1 = 0
                 if phase in ['Dreg', 'Dboth']:
                     with torch.autograd.profiler.record_function('r1_grads'), conv2d_gradfix.no_weight_gradients():
@@ -133,6 +135,7 @@ class StyleGAN2Loss(Loss):
                     loss_Dr1 = r1_penalty * (self.r1_gamma / 2)
                     training_stats.report('Loss/r1_penalty', r1_penalty)
                     training_stats.report('Loss/D/reg', loss_Dr1)
+                    print("Dis_r1", (loss_Dr1).mean().item()*gain)
 
             with torch.autograd.profiler.record_function(name + '_backward'):
                 (loss_Dreal + loss_Dr1).mean().mul(gain).backward()

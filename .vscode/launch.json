@@ -1,0 +1,32 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Train StyleGAN3",
+            "type": "python",
+            "request": "launch",
+            "program": "./train.py",
+            "console": "integratedTerminal",
+            "args": ["--outdir=./training-runs", "--data=./data/afhqv2-512x512.zip", "--gpus=1", "--cfg=stylegan2", "--gamma=5", "--mirror=1", "--cond=False", "--batch=4", "--metrics=none", "--nobench=True"],
+        },
+        {
+            "name": "Train CIFAR10",
+            "type": "python",
+            "request": "launch",
+            "program": "./train.py",
+            "console": "integratedTerminal",
+            "args": ["--outdir=./training-runs", "--data=./data/cifar10.zip", "--gpus=1", "--cfg=stylegan3-t", "--gamma=0.01", "--mirror=1", "--cond=True", "--batch=64", "--batch-gpu=32", "--metrics=none", "--seed=123"],
+        }
+
+    ]
+}

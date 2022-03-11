@@ -104,7 +104,7 @@ class FullyConnectedLayer(torch.nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.activation = activation
-        self.weight = torch.nn.Parameter(torch.randn([out_features, in_features]) / lr_multiplier)
+        self.weight = torch.nn.Parameter(torch.ones([out_features, in_features]) / lr_multiplier)
         self.bias = torch.nn.Parameter(torch.full([out_features], np.float32(bias_init))) if bias else None
         self.weight_gain = lr_multiplier / np.sqrt(in_features)
         self.bias_gain = lr_multiplier
@@ -157,7 +157,7 @@ class Conv2dLayer(torch.nn.Module):
         self.act_gain = bias_act.activation_funcs[activation].def_gain
 
         memory_format = torch.channels_last if channels_last else torch.contiguous_format
-        weight = torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format)
+        weight = torch.ones([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format)
         bias = torch.zeros([out_channels]) if bias else None
         if trainable:
             self.weight = torch.nn.Parameter(weight)
@@ -300,9 +300,9 @@ class SynthesisLayer(torch.nn.Module):
 
         self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)
         memory_format = torch.channels_last if channels_last else torch.contiguous_format
-        self.weight = torch.nn.Parameter(torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
+        self.weight = torch.nn.Parameter(torch.ones([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
         if use_noise:
-            self.register_buffer('noise_const', torch.randn([resolution, resolution]))
+            self.register_buffer('noise_const', torch.ones([resolution, resolution]))
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
 
@@ -314,7 +314,7 @@ class SynthesisLayer(torch.nn.Module):
 
         noise = None
         if self.use_noise and noise_mode == 'random':
-            noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
+            noise = torch.ones([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
         if self.use_noise and noise_mode == 'const':
             noise = self.noise_const * self.noise_strength
 
@@ -344,7 +344,7 @@ class ToRGBLayer(torch.nn.Module):
         self.conv_clamp = conv_clamp
         self.affine = FullyConnectedLayer(w_dim, in_channels, bias_init=1)
         memory_format = torch.channels_last if channels_last else torch.contiguous_format
-        self.weight = torch.nn.Parameter(torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
+        self.weight = torch.nn.Parameter(torch.ones([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
         self.weight_gain = 1 / np.sqrt(in_channels * (kernel_size ** 2))
 
@@ -392,7 +392,7 @@ class SynthesisBlock(torch.nn.Module):
         self.num_torgb = 0
 
         if in_channels == 0:
-            self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
+            self.const = torch.nn.Parameter(torch.ones([out_channels, resolution, resolution]))
 
         if in_channels != 0:
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
